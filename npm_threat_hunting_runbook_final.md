@@ -1,0 +1,771 @@
+![Crimson7](https://cdn.prod.website-files.com/67711bb097dfc839a8004a6c/68482a560217871b92242435_c7_logo_small.png)
+
+# NPM Supply Chain Compromise Threat Hunting Runbook
+## Microsoft Sentinel & Defender Environment - Final Version
+
+**Runbook Type**: Supply Chain Attack Investigation  
+**Target Platforms**: Microsoft Sentinel, Microsoft Defender for Endpoint  
+**Attack Vector**: NPM Package Compromise via Supply Chain   
+**Affected Packages**: debug, chalk, and 16 other popular npm packages  
+**Attack Vector**: supply chain compromise via infected npm repositories with javascript malware 
+**Primary Impact**: Browser-based cryptocurrency theft through supply chain compromise
+
+Inspired from the Aikido threat intel advisory https://www.aikido.dev/blog/npm-debug-and-chalk-packages-compromised
+
+---
+
+## Table of Contents
+1. [Investigation Methodology](#investigation-methodology)
+2. [Prerequisites and Data Sources](#prerequisites-and-data-sources)
+3. [Stage 1: Initial Detection and Triage](#stage-1-initial-detection-and-triage)
+4. [Stage 2: Focused Investigation](#stage-2-focused-investigation)
+5. [Stage 3: Deep Forensic Analysis](#stage-3-deep-forensic-analysis)
+6. [Stage 4: Verification and Validation](#stage-4-verification-and-validation)
+7. [Remediation and Recovery](#remediation-and-recovery)
+8. [Lessons Learned](#lessons-learned)
+
+---
+
+## Investigation Methodology
+
+### Interactive Investigation Workflow
+
+```mermaid
+graph TD
+    A[Initial Alert/Suspicion] --> B{Broad Detection Sweep}
+    B --> C[Findings Analysis]
+    C --> D{Suspicious Activity?}
+    D -->|Yes| E[Focused Investigation]
+    D -->|No| F[Document & Close]
+    E --> G{Verify Legitimacy}
+    G -->|Malicious| H[Deep Forensic Analysis]
+    G -->|Legitimate| I[Update Baselines]
+    H --> J[Evidence Collection]
+    J --> K[Incident Response]
+```
+
+### Key Investigation Principles
+
+1. **Progressive Investigation**: Start broad, then narrow focus based on findings
+2. **Always Verify**: Validate suspicious findings before escalation to avoid false positives
+3. **Context Awareness**: Understand normal business operations (e.g., legitimate crypto APIs)
+4. **Evidence Preservation**: Export data progressively during investigation
+5. **Document Everything**: Maintain audit trail of queries and findings
+
+---
+
+## Prerequisites and Data Sources
+
+### Core Requirements
+- **Microsoft Defender for Endpoint (MDE)**: 
+  - Tables: DeviceProcessEvents, DeviceFileEvents, DeviceNetworkEvents, DeviceEvents, DeviceInfo
+  - License: Microsoft Defender for Endpoint P1 or P2
+
+### Additional Requirements
+- **Microsoft 365 Defender** (Email detection): EmailEvents table
+- **Azure AD** (Authentication): SigninLogs, AuditLogs tables
+- **Threat Intelligence** (Optional): ThreatIntelligenceIndicator table (paid service)
+- **Custom Logs** (for companies using internal package repositories): Syslog or CustomLog_CL for JFrog/Artifactory
+
+### Critical Visibility Gaps
+1. **Package Repository Logs**: Implement custom ingestion for artifact repositories
+2. **Container Runtime**: Ensure container process visibility, this is NOT COVERED HERE
+3. **Browser Extensions**: Enhanced telemetry for browser security
+4. **Build Pipeline Logs**: CI/CD activity monitoring
+
+---
+
+## Stage 1: Initial Detection and Triage
+
+### Hypothesis 1.1: Comprehensive NPM Package Detection
+**Objective**: Cast a wide net to identify any systems with suspicious NPM activity
+
+#### Query 1.1.1 - Broad Package and Hash Detection
+```kql
+// Run this FIRST for initial triage
+let timeframe = 30d;
+let all_packages = dynamic([
+    "debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
+    "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
+    "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
+    "supports-hyperlinks", "chalk-template", "backslash"
+]);
+let malicious_hashes = dynamic([
+    "c26e923750ff24150d13dea46e0c9d848b390f0f",
+    "e9f9235f0fd79f5a7d099276ec6a9f8c5f0ddce9",
+    "ebcf69dc3d77aab6a23c733bf8d3de835a4a819a",
+    "5518bc3a1df75f8e480efb32fa78de15e775155d",
+    "c577099020e7ae370c67ce9a31170eff4d7f2b038"
+]);
+// Check for file presence and npm commands
+let file_detections = DeviceFileEvents
+    | where Timestamp > ago(timeframe)
+    | where SHA1 in (malicious_hashes) or FileName has_any (all_packages)
+    | where FolderPath contains "node_modules"
+    | extend DetectionType = "FilePresence"
+    | project Timestamp, DeviceName, FileName, FolderPath, SHA1, DetectionType;
+let npm_commands = DeviceProcessEvents
+    | where Timestamp > ago(timeframe)
+    | where FileName in~ ("npm", "npm.exe", "npm.cmd", "yarn", "yarn.exe", "pnpm", "pnpm.exe")
+    | extend LowerCommandLine = tolower(ProcessCommandLine)
+    | where LowerCommandLine has_any (all_packages)
+    | extend DetectionType = "NPMCommand"
+    | project Timestamp, DeviceName, ProcessCommandLine, DetectionType;
+union file_detections, npm_commands
+| summarize 
+    FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp),
+    DetectionTypes = make_set(DetectionType),
+    EventCount = count()
+    by DeviceName
+| extend RiskLevel = case(
+    DetectionTypes has "FilePresence" and DetectionTypes has "NPMCommand", "CRITICAL",
+    DetectionTypes has "FilePresence", "HIGH",
+    DetectionTypes has "NPMCommand", "MEDIUM",
+    "LOW")
+| order by RiskLevel asc, EventCount desc
+```
+
+**Action Steps:**
+1. Export results to CSV for tracking
+2. Prioritize devices with "CRITICAL" or "HIGH" risk
+3. Note any devices with hash matches (confirmed compromise)
+4. Proceed to Stage 2 for HIGH/CRITICAL devices
+
+#### Query 1.1.2 - Direct Hash Detection
+```kql
+// Hunt for known malicious file hashes, these are known by doing a search on the internet
+let malicious_hashes = dynamic([
+    "c26e923750ff24150d13dea46e0c9d848b390f0f",
+    "e9f9235f0fd79f5a7d099276ec6a9f8c5f0ddce9",
+    "ebcf69dc3d77aab6a23c733bf8d3de835a4a819a",
+    "5518bc3a1df75f8e480efb32fa78de15e775155d",
+    "c577099020e7ae370c67ce9a31170eff4d7f2b038"
+]);
+DeviceFileEvents
+| where Timestamp > ago(30d)
+| where SHA1 in (malicious_hashes)
+| project Timestamp, DeviceName, FileName, FolderPath, SHA1, 
+    InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessAccountName
+| extend ThreatName = "NPM_Package_Compromise"
+| order by Timestamp desc
+```
+
+**Action Steps:**
+1. Any device with hash match = **CONFIRMED COMPROMISE**
+2. Immediately isolate affected devices
+3. Collect forensic image before remediation
+4. Interview users about file origin
+
+---
+
+## Stage 2: Focused Investigation
+
+### Hypothesis 2.1: Process Execution Anomalies
+**Objective**: Detect suspicious process execution patterns that indicate compromise
+
+#### Query 2.1.1 - Bare Command Execution Detection (Critical Pattern)
+```kql
+// CRITICAL: Bare commands without paths are highly suspicious
+DeviceProcessEvents
+| where Timestamp > ago(14d)
+| where FileName in~ ("node", "npm", "yarn", "pnpm")
+| extend CommandPattern = case(
+    // SUSPICIOUS: Bare command without path
+    ProcessCommandLine matches regex @"^node\s+\w+\.js$", "SUSPICIOUS_BARE_COMMAND",
+    ProcessCommandLine == "node index.js", "CRITICAL_BARE_INDEX",
+    // Evaluation patterns
+    ProcessCommandLine contains "eval", "Eval_Usage",
+    ProcessCommandLine contains "base64", "Base64_Encoding",
+    // LEGITIMATE: Full paths
+    ProcessCommandLine matches regex @"^/[\w/]+/node\s+/[\w/]+\.js", "Legitimate_Full_Path",
+    "Unknown"
+)
+| where CommandPattern != "Legitimate_Full_Path"
+| project Timestamp, DeviceName, ProcessCommandLine, CommandPattern,
+    InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName,
+    ProcessId, InitiatingProcessId
+| extend RiskScore = case(
+    CommandPattern == "CRITICAL_BARE_INDEX", 100,
+    CommandPattern == "SUSPICIOUS_BARE_COMMAND", 90,
+    CommandPattern == "Eval_Usage", 80,
+    CommandPattern == "Base64_Encoding", 70,
+    50)
+| order by RiskScore desc, Timestamp desc
+```
+
+**Action Steps:**
+1. **CRITICAL_BARE_INDEX** = Confirmed malicious execution
+2. Investigate parent process chain for automation tools
+3. Check if executed via scheduler (cron, rundeck, etc.)
+4. Extract working directory for malicious files
+
+#### Query 2.1.2 - NPM Package Installation Activity
+```kql
+// Detect npm install commands for ALL 18 compromised packages
+let compromised_packages = dynamic([
+    "debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
+    "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
+    "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
+    "supports-hyperlinks", "chalk-template", "backslash"
+]);
+DeviceProcessEvents
+| where Timestamp > ago(14d)
+| where FileName =~ "npm.exe" or FileName =~ "npm" or FileName =~ "npm.cmd"
+| where ProcessCommandLine has "install"
+| extend LowerCommandLine = tolower(ProcessCommandLine)
+| where LowerCommandLine has_any (compromised_packages)
+| project Timestamp, DeviceName, ProcessCommandLine, AccountName, 
+    InitiatingProcessFileName, InitiatingProcessFolderPath
+| extend InstallType = iff(
+    ProcessCommandLine matches regex @"@\d+\.\d+\.\d+", 
+    "Version-Specific", 
+    "Latest-Version")
+```
+
+**Action Steps:**
+1. Note specific packages and versions installed
+2. Check if installations were manual or automated
+3. Review package.json files in affected projects
+4. Audit npm cache and local repositories
+
+### Hypothesis 2.2: Browser Extension Persistence
+**Objective**: Detect browser extension modifications used for cryptocurrency theft
+
+#### Query 2.2.1 - Browser Extension File Modifications
+```kql
+// Detect suspicious browser extension activity
+DeviceFileEvents
+| where Timestamp > ago(14d)
+| where FolderPath has_any ("Extensions", "Chrome", "Edge", "Firefox", "Brave")
+| where FileName endswith ".js" or FileName endswith ".json"
+| where ActionType in ("FileCreated", "FileModified")
+| where FileName has_any ("inject", "hook", "wallet", "content", "background",
+    "page_embed_script", "service_worker")
+| project Timestamp, DeviceName, FileName, FolderPath, SHA1, SHA256,
+    ActionType, InitiatingProcessFileName, AccountName
+| summarize 
+    ModificationCount = count(),
+    UniqueFiles = dcount(FileName),
+    FileList = make_set(FileName, 20),
+    HashList = make_set(SHA1, 20)
+    by DeviceName, bin(Timestamp, 1h)
+| where ModificationCount > 5
+```
+
+**Action Steps:**
+1. Export SHA1 hashes for threat intelligence
+2. Collect browser extension files for analysis
+3. Check for wallet-related keywords in files
+4. Alert users about potential wallet compromise
+
+#### Query 2.2.2 - Cryptocurrency Wallet Service Detection
+```kql
+// Detect active cryptocurrency wallet services
+union
+(DeviceProcessEvents
+| where Timestamp > ago(14d)
+| where ProcessCommandLine has_any ("wallet", "metamask", "ethereum", "web3", 
+    "xpay", "crypto", "ledger", "trezor")),
+(DeviceNetworkEvents
+| where Timestamp > ago(14d)
+| where RemoteUrl has_any ("metamask", "etherscan", "binance", "coinbase", 
+    "fireblocks", "polkadot"))
+| summarize 
+    CryptoActivityCount = count(),
+    ActivityTypes = make_set(Type),
+    Processes = make_set(ProcessCommandLine, 10),
+    URLs = make_set(RemoteUrl, 10)
+    by DeviceName
+| where CryptoActivityCount > 20
+| extend RiskLevel = case(
+    Processes has_any ("xpay", "wallet"), "HIGH",
+    CryptoActivityCount > 100, "MEDIUM",
+    "LOW")
+```
+
+**Action Steps:**
+1. **HIGH risk + compromised package = CRITICAL**
+2. Alert users to check wallet transactions
+3. Recommend wallet key rotation
+4. Monitor for unauthorized transactions
+
+### Hypothesis 2.3: Automation and Scheduler Abuse
+**Objective**: Detect persistence through automation tools
+
+#### Query 2.3.1 - Scheduler and Automation Detection
+```kql
+// Detect abuse of automation tools for persistence
+DeviceProcessEvents
+| where Timestamp > ago(14d)
+| where InitiatingProcessFileName has_any ("cron", "rundeck", "jenkins", 
+    "systemd", "at", "schtasks")
+    or AccountName has_any ("rundeck", "jenkins", "automation", "svc")
+| where ProcessCommandLine has_any ("node", "npm", "yarn")
+| extend SchedulerType = case(
+    InitiatingProcessFileName contains "rundeck", "Rundeck",
+    InitiatingProcessFileName contains "cron", "Cron",
+    InitiatingProcessFileName contains "jenkins", "Jenkins",
+    InitiatingProcessFileName contains "systemd", "Systemd",
+    AccountName contains "rundeck", "Rundeck_Account",
+    "Other")
+| project Timestamp, DeviceName, SchedulerType, ProcessCommandLine,
+    AccountName, InitiatingProcessCommandLine, ProcessId
+| summarize 
+    ExecutionCount = count(),
+    UniqueCommands = dcount(ProcessCommandLine),
+    Commands = make_set(ProcessCommandLine, 10)
+    by DeviceName, SchedulerType, AccountName
+| where ExecutionCount > 5
+```
+
+**Action Steps:**
+1. Review all scheduled jobs for suspicious entries
+2. Check automation tool configurations
+3. Audit service account permissions
+4. Disable suspicious scheduled tasks
+
+---
+
+## Stage 3: Deep Forensic Analysis
+
+### Hypothesis 3.1: Container Environment Compromise
+**Objective**: Detect compromise in containerized environments
+
+#### Query 3.1.1 - Container Process Chain Analysis
+```kql
+// Analyze container runtime for suspicious npm activity
+DeviceProcessEvents
+| where Timestamp > ago(14d)
+| where InitiatingProcessFileName has_any ("docker", "containerd", "runc", "podman")
+    or ProcessCommandLine has_any ("docker", "kubectl", "podman")
+| where ProcessCommandLine has_any ("npm", "node", "yarn")
+| extend ContainerAction = case(
+    InitiatingProcessFileName contains "runc", "Container_Runtime",
+    ProcessCommandLine contains "docker build", "Image_Build",
+    ProcessCommandLine contains "docker run", "Container_Run",
+    ProcessCommandLine contains "npm start", "NPM_Start",
+    ProcessCommandLine == "node index.js", "SUSPICIOUS_NODE",
+    "Other")
+| project Timestamp, DeviceName, ContainerAction, ProcessCommandLine,
+    InitiatingProcessFileName, AccountName, ProcessId
+| extend Risk = iff(ContainerAction == "SUSPICIOUS_NODE", "CRITICAL", "Monitor")
+```
+
+**Action Steps:**
+1. Review container images for embedded malware
+2. Scan container registries for compromised images
+3. Audit Dockerfile and build processes
+4. Check for unauthorized container deployments
+
+#### Query 3.1.2 - Build Pipeline Compromise Detection
+```kql
+// Detect CI/CD pipeline execution with ALL 18 compromised packages
+DeviceProcessEvents
+| where Timestamp > ago(14d)
+| where ProcessCommandLine has_any ("npm install", "npm ci", "yarn install")
+    or InitiatingProcessFileName has_any ("jenkins", "gitlab-runner", 
+        "azure-pipelines-agent", "github-actions-runner")
+| where ProcessCommandLine has_any ("debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
+    "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
+    "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
+    "supports-hyperlinks", "chalk-template", "backslash")
+| project Timestamp, DeviceName, FileName, ProcessCommandLine, 
+    InitiatingProcessFileName, AccountName
+| extend BuildSystem = case(
+    InitiatingProcessFileName contains "jenkins", "Jenkins",
+    InitiatingProcessFileName contains "gitlab", "GitLab",
+    InitiatingProcessFileName contains "azure", "Azure_DevOps",
+    InitiatingProcessFileName contains "github", "GitHub_Actions",
+    "Unknown")
+| summarize BuildCount = count(), 
+    Packages = make_set(ProcessCommandLine, 10) 
+    by DeviceName, BuildSystem
+```
+
+**Action Steps:**
+1. Review build logs for package versions
+2. Scan build artifacts for malicious code
+3. Audit pipeline configurations
+4. Implement package version locking
+
+### Hypothesis 3.2: Network Communication Analysis
+**Objective**: Identify command and control or data exfiltration
+
+#### Query 3.2.1 - Suspicious Node.js Network Connections
+```kql
+// Monitor Node.js processes making unusual network connections
+DeviceNetworkEvents
+| where Timestamp > ago(7d)
+| where InitiatingProcessFileName =~ "node.exe" or InitiatingProcessFileName =~ "node"
+| where RemoteIPType == "Public"
+| where RemotePort !in (80, 443, 22, 3000, 3001, 4200, 8080, 8081)
+| project Timestamp, DeviceName, RemoteIP, RemotePort, RemoteUrl,
+    InitiatingProcessCommandLine, AccountName, BytesSent, BytesReceived
+| summarize 
+    TotalBytes = sum(BytesSent + BytesReceived),
+    ConnectionCount = count(), 
+    UniqueIPs = make_set(RemoteIP, 100),
+    Ports = make_set(RemotePort, 20)
+    by DeviceName, InitiatingProcessCommandLine
+| where ConnectionCount > 10 or TotalBytes > 1000000
+```
+
+**Action Steps:**
+1. Investigate IPs for known C2 infrastructure
+2. Check for data exfiltration patterns
+3. Review DNS queries for suspicious domains
+4. Analyze traffic volume and timing
+
+### Hypothesis 3.3: Supply Chain Propagation
+**Objective**: Track spread of compromise across projects
+
+#### Query 3.3.1 - Multi-Project Contamination Detection
+```kql
+// Identify spread across multiple projects with ALL 18 packages
+let package_modifications = DeviceFileEvents
+    | where Timestamp > ago(14d)
+    | where FileName =~ "package.json"
+    | where ActionType == "FileModified"
+    | project DeviceName, ModificationTime = Timestamp, ProjectPath = FolderPath;
+let node_modules_content = DeviceFileEvents
+    | where Timestamp > ago(14d)
+    | where FolderPath contains "node_modules"
+    | where FileName has_any ("debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
+        "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
+        "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
+        "supports-hyperlinks", "chalk-template", "backslash")
+    | project DeviceName, FileTime = Timestamp, ModulePath = FolderPath;
+package_modifications
+| join kind=inner (node_modules_content) on DeviceName
+| where abs(datetime_diff('hour', ModificationTime, FileTime)) < 24
+| summarize 
+    ProjectCount = dcount(ProjectPath), 
+    Projects = make_set(ProjectPath, 50),
+    Packages = make_set(ModulePath, 50) 
+    by DeviceName
+| where ProjectCount > 2
+```
+
+**Action Steps:**
+1. Map affected projects and dependencies
+2. Create contamination timeline
+3. Identify shared dependencies
+4. Plan coordinated cleanup
+
+---
+
+## Stage 4: Verification and Validation
+
+### Hypothesis 4.1: False Positive Reduction
+**Objective**: Distinguish legitimate activity from malicious
+
+#### Query 4.1.1 - Baseline Comparison
+```kql
+// Compare current activity against historical baseline
+let baseline_period = 90d;
+let investigation_period = 7d;
+let baseline = DeviceProcessEvents
+| where Timestamp between (ago(baseline_period) .. ago(investigation_period))
+| where ProcessCommandLine contains "node"
+| summarize BaselineCount = count() by ProcessCommandLine
+| where BaselineCount > 10;
+DeviceProcessEvents
+| where Timestamp > ago(investigation_period)
+| where ProcessCommandLine contains "node"
+| join kind=leftanti baseline on ProcessCommandLine
+| project Timestamp, DeviceName, ProcessCommandLine, AccountName
+| extend Anomaly = "New_Process_Pattern"
+| take 100
+```
+
+**Action Steps:**
+1. Review new patterns for legitimacy
+2. Update baseline with confirmed legitimate patterns
+3. Document false positives for future reference
+
+#### Query 4.1.2 - Legitimate Service Verification
+```kql
+// Identify and exclude known legitimate services
+let legitimate_services = datatable(ServiceName:string, Pattern:string)
+[
+    "Node_Application", "/opt/app",
+    "DevOps_Agent", "/sre/ado/agents",
+    "Jenkins", "/var/lib/jenkins",
+    "Docker", "/usr/bin/docker"
+];
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where ProcessCommandLine contains "node"
+| extend ServiceMatch = "Unknown"
+| mv-apply Service = legitimate_services on (
+    extend ServiceMatch = iff(ProcessCommandLine contains Service.Pattern, 
+        Service.ServiceName, ServiceMatch)
+)
+| where ServiceMatch == "Unknown"
+| project Timestamp, DeviceName, ProcessCommandLine, ServiceMatch
+| take 100
+```
+
+**Action Steps:**
+1. Validate unknown services with system owners
+2. Update legitimate service list
+3. Create exceptions for confirmed services
+
+---
+
+## Remediation and Recovery
+
+### Query R.1 - Comprehensive Affected Systems Identification
+```kql
+// Identify all affected systems for remediation - ALL 18 packages
+let affected_by_hash = DeviceFileEvents
+    | where Timestamp > ago(30d)
+    | where SHA1 in (dynamic([
+        "c26e923750ff24150d13dea46e0c9d848b390f0f",
+        "e9f9235f0fd79f5a7d099276ec6a9f8c5f0ddce9",
+        "ebcf69dc3d77aab6a23c733bf8d3de835a4a819a",
+        "5518bc3a1df75f8e480efb32fa78de15e775155d",
+        "c577099020e7ae370c67ce9a31170eff4d7f2b038"
+    ]))
+    | distinct DeviceName, Category = "Hash_Detection";
+let affected_by_package = DeviceProcessEvents
+    | where Timestamp > ago(30d)
+    | where ProcessCommandLine has_any ("debug@", "chalk@", "ansi-styles@", "strip-ansi@", 
+        "supports-color@", "wrap-ansi@", "ansi-regex@", "color-convert@", "slice-ansi@",
+        "is-arrayish@", "color-name@", "error-ex@", "color-string@", "simple-swizzle@",
+        "has-ansi@", "supports-hyperlinks@", "chalk-template@", "backslash@")
+    | distinct DeviceName, Category = "Package_Installation";
+let affected_by_npm = DeviceProcessEvents
+    | where Timestamp > ago(30d)
+    | where FileName in~ ("npm", "npm.exe", "npm.cmd")
+    | where ProcessCommandLine has "install"
+    | where ProcessCommandLine has_any ("debug", "chalk", "ansi-styles", "strip-ansi", 
+        "supports-color", "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi",
+        "is-arrayish", "color-name", "error-ex", "color-string", "simple-swizzle",
+        "has-ansi", "supports-hyperlinks", "chalk-template", "backslash")
+    | distinct DeviceName, Category = "NPM_Activity";
+union affected_by_hash, affected_by_package, affected_by_npm
+| summarize Categories = make_set(Category) by DeviceName
+| extend Priority = case(
+    Categories has "Hash_Detection", "CRITICAL",
+    array_length(Categories) >= 2, "HIGH",
+    Categories has "Package_Installation", "MEDIUM",
+    "LOW")
+| order by Priority asc, DeviceName asc
+```
+
+### Query R.2 - Cleanup Validation
+```kql
+// Verify successful cleanup for ALL 18 packages
+DeviceFileEvents
+| where Timestamp > ago(1d)
+| where ActionType == "FileDeleted"
+| where FolderPath contains "node_modules"
+| where FileName has_any ("debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
+    "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
+    "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
+    "supports-hyperlinks", "chalk-template", "backslash")
+| project Timestamp, DeviceName, FileName, FolderPath, InitiatingProcessAccountName
+| summarize CleanedPackages = count() by DeviceName
+```
+
+### Remediation Checklist
+
+#### Immediate Actions (0-2 hours)
+- [ ] Isolate devices with confirmed compromise
+- [ ] Kill suspicious node processes
+- [ ] Disable scheduled tasks/automation
+- [ ] Alert wallet users about potential theft
+- [ ] Block malicious hashes at EDR level
+
+#### Short-term (2-24 hours)
+- [ ] Remove malicious packages from all systems
+- [ ] Update package.json with safe versions
+- [ ] Clear npm cache
+- [ ] Scan artifact repositories
+- [ ] Rotate potentially compromised credentials
+
+#### Long-term (1-7 days)
+- [ ] Implement package allowlisting
+- [ ] Deploy vulnerability scanning in CI/CD
+- [ ] Conduct security training
+- [ ] Update incident response procedures
+- [ ] Implement npm audit in builds
+
+---
+
+## Stage 5: Enhanced Malware-Specific Detection
+
+### Hypothesis 5.1: Wallet File and Cryptocurrency Detection
+**Objective**: Identify wallet-related files that could be targeted by the malware
+
+#### Query 5.1.1 - Wallet and Crypto File Detection
+```kql
+// Hunt for wallet and cryptocurrency-related files
+DeviceFileEvents
+| where Timestamp > ago(30d)
+| where FileName endswith ".js" or FileName endswith ".json"
+| where FileName has_any ("wallet", "crypto", "eth", "btc", "metamask", "web3")
+| project Timestamp, DeviceName, FileName, FolderPath, SHA1, InitiatingProcessFileName
+| extend RiskLevel = case(
+    FileName contains "wallet" and FolderPath contains "Temp", "CRITICAL",
+    FileName contains "crypto", "HIGH",
+    "MEDIUM")
+| order by RiskLevel asc, Timestamp desc
+```
+
+**Action Steps:**
+1. **CRITICAL files** in Temp directories = potential active exploitation
+2. Review SHA1 hashes against threat intelligence
+3. Investigate devices with multiple wallet files
+4. Alert users about wallet compromise risk
+
+### Hypothesis 5.2: Browser Extension Persistence Detection
+**Objective**: Detect malicious browser extension modifications for persistence
+
+#### Query 5.2.1 - Critical Extension File Modifications
+```kql
+// Detect suspicious browser extension modifications
+DeviceFileEvents
+| where Timestamp > ago(30d)
+| where FolderPath has_any ("Extensions", "Chrome", "Edge", "Firefox")
+| where FileName in~ ("content.js", "background.js", "inject.js", "contentscript.js", "injected.js")
+| where ActionType in ("FileCreated", "FileModified")
+| project Timestamp, DeviceName, FileName, FolderPath, SHA1, ActionType, InitiatingProcessFileName
+| extend RiskLevel = case(
+    FileName == "inject.js", "CRITICAL",
+    FileName == "contentscript.js" and DeviceName == "win11v1-eng1204", "CRITICAL",
+    FileName == "contentscript.js", "HIGH",
+    "MEDIUM")
+```
+
+**Action Steps:**
+1. **inject.js** = Highest risk for malicious injection
+2. Check SHA1: bc2b338e20c36998a6fc3ffffa94e57d30e4e513 (repeated across devices)
+3. Investigate win11v1-eng1204 contentscript.js (known compromised device)
+4. Review extension manifests for permissions
+
+### Hypothesis 5.3: Wallet Service Process Monitoring
+**Objective**: Identify systems running wallet services that are prime targets
+
+#### Query 5.3.1 - Active Wallet Service Detection
+```kql
+// Monitor for active wallet services
+DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where ProcessCommandLine has_any ("ethereum", "metamask", "web3", "wallet", "crypto")
+| where InitiatingProcessFileName has_any ("chrome.exe", "msedge.exe", "firefox.exe", "brave.exe")
+| project Timestamp, DeviceName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessAccountName
+| extend ServiceType = case(
+    ProcessCommandLine contains "edge_xpay_wallet", "Edge_XPay_Wallet",
+    ProcessCommandLine contains "metamask", "MetaMask",
+    ProcessCommandLine contains "ethereum", "Ethereum",
+    "Other_Wallet")
+| summarize WalletProcessCount = count() by DeviceName, ServiceType
+```
+
+**Action Steps:**
+1. Prioritize devices with active wallet services for protection
+2. Alert users about cryptocurrency theft risk
+3. Monitor for unusual wallet transaction attempts
+4. Implement additional security for wallet services
+
+### Hypothesis 5.4: Large JavaScript Bundle Analysis
+**Objective**: Detect potentially contaminated webpack bundles
+
+#### Query 5.4.1 - Suspicious Bundle Detection
+```kql
+// Hunt for large JavaScript bundles that may contain malicious code
+DeviceFileEvents
+| where Timestamp > ago(30d)
+| where FileName in~ ("bundle.js", "main.js", "app.js", "vendor.js", "chunk.js")
+| where FolderPath has_any ("dist", "build", "public", "static")
+| where FileSize > 100000
+| project Timestamp, DeviceName, FileName, FolderPath, FileSize, SHA1, InitiatingProcessFileName
+| extend SizeCategory = case(
+    FileSize > 5000000, "Very_Large",
+    FileSize > 1000000, "Large",
+    "Medium")
+| order by FileSize desc
+```
+
+**Action Steps:**
+1. Analyze SHA1: 3715675aa1dd32897e31694cb0c53ea4f896d22b (5.3MB bundle)
+2. Extract and scan large bundles for obfuscation patterns
+3. Search for wallet address lists in bundles
+4. Check for Levenshtein algorithm implementations
+
+---
+
+## Lessons Learned
+
+### Key Detection Patterns
+1. **Bare Command Execution**: `node index.js` without path = malicious
+2. **Process Chains**: Shell wrapper (`sh -c`) often indicates script execution
+3. **Automation Abuse**: Legitimate tools (rundeck, cron) used for persistence
+4. **Browser Persistence**: Extension modifications for wallet theft
+5. **Container Hiding**: Malicious activity within container runtime
+
+### Common False Positives
+1. **Legitimate Crypto Services**: Fintech companies use blockchain APIs
+2. **Development Activity**: Normal npm operations in dev environments
+3. **Build Automation**: CI/CD pipelines installing packages
+4. **Microservices**: Legitimate Node.js applications
+
+### Investigation Best Practices
+1. **Always verify context** before declaring malicious
+2. **Check process lineage** to understand execution chain
+3. **Correlate multiple indicators** for confidence
+4. **Preserve evidence** before remediation
+5. **Document false positives** for future hunts
+
+---
+
+## Forensic Collection Template
+
+```kql
+// Template for comprehensive forensic collection
+let investigation_device = "TARGET_DEVICE_NAME";
+let investigation_timeframe = 30d;
+union
+(DeviceProcessEvents 
+| where Timestamp > ago(investigation_timeframe)
+| where DeviceName == investigation_device
+| extend EvidenceType = "Process"),
+(DeviceFileEvents
+| where Timestamp > ago(investigation_timeframe)
+| where DeviceName == investigation_device
+| extend EvidenceType = "File"),
+(DeviceNetworkEvents
+| where Timestamp > ago(investigation_timeframe)
+| where DeviceName == investigation_device
+| extend EvidenceType = "Network")
+| project Timestamp, EvidenceType, 
+    Details = pack_all()
+| order by Timestamp asc
+```
+
+---
+
+## Quick Reference Card
+
+### Critical IOCs
+- **Malicious Hashes**: c26e923750ff24150d13dea46e0c9d848b390f0f, e9f9235f0fd79f5a7d099276ec6a9f8c5f0ddce9, ebcf69dc3d77aab6a23c733bf8d3de835a4a819a, 5518bc3a1df75f8e480efb32fa78de15e775155d, c577099020e7ae370c67ce9a31170eff4d7f2b038
+- **Suspicious Commands**: `node index.js` (bare), `sh -c node`
+- **ALL 18 Compromised Packages**: debug, chalk, ansi-styles, strip-ansi, supports-color, wrap-ansi, ansi-regex, color-convert, slice-ansi, is-arrayish, color-name, error-ex, color-string, simple-swizzle, has-ansi, supports-hyperlinks, chalk-template, backslash
+- **Browser Files**: page_embed_script.js, service_worker.js
+- **Automation Accounts**: rundeck, jenkins, automation service accounts
+
+### Severity Classification
+- **CRITICAL**: Confirmed hash match or bare command execution
+- **HIGH**: Multiple indicators or wallet services at risk
+- **MEDIUM**: Package installation or suspicious patterns
+- **LOW**: Anomalous activity requiring investigation
+
+
+---
+
+**End of Runbook**
+
+*Version: Draft, queries validated with Sentinel | author: Crimson7 (www.crimson7.io)
