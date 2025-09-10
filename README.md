@@ -2,14 +2,13 @@
 
 ## Overview
 
-This repository contains tools for detecting and investigating the September 2025 NPM supply chain compromise that affected 25 popular packages through a sophisticated phishing attack. The malware targets cryptocurrency wallets by injecting malicious code that intercepts and redirects transactions.
+This repository contains a tool for detecting and investigating the September 2025 NPM compromise that affected 25 popular packages through a sophisticated phishing attack. The malware targets cryptocurrency wallets by injecting malicious code that intercepts and redirects transactions.
 
-## 🚀 v1.1.0 Final Release
-
-This is the production-ready version of the Crimson7 NPM Scanner focusing exclusively on reliable API-based scanning methods:
+## 🚀 v1.1.0 Final Draft
 
 ### ✅ Features Included:
 - **API-Based Repository Scanning**: Full support for JFrog Artifactory and NPM Registry
+- **Non authenticated scan** of know packages contained in a json file definistion
 - **Deep Scan Capability**: Downloads and analyzes actual package contents for obfuscation patterns
 - **Comprehensive Mode (-All)**: Scans extended package lists (45 packages for NPM Registry)
 - **Cross-Platform Support**: Works on Windows, macOS, and Linux with PowerShell
@@ -21,7 +20,6 @@ This is the production-ready version of the Crimson7 NPM Scanner focusing exclus
 - Enhanced deep scanning with actual package tarball downloads
 - Improved error handling and cross-platform compatibility
 - Updated malicious package database (18 → 25 packages)
-- Professional Crimson7 branding and reporting
 
 ## 🚨 Critical Information
 
@@ -43,10 +41,6 @@ This is the production-ready version of the Crimson7 NPM Scanner focusing exclus
 | `NPM_Compromise_Timeline.md` | Complete incident timeline and analysis |
 | `npm_threat_hunting_runbook_final.md` | KQL queries for Microsoft Sentinel |
 | `NPM_Compromise_Executive_Summary_and_Report.md` | Executive report with findings |
-
-### 📊 Hunt Results
-- `hunt_results/` - Directory containing CSV exports from threat hunting
-- `forensics/` - Forensic data from investigated systems
 
 ## Installation & Setup
 
@@ -181,7 +175,7 @@ Scan both local and remote simultaneously:
 | `-RepositoryUrl` | No | Remote repository URL | `-RepositoryUrl "https://registry.npmjs.org/"` |
 | `-ApiKey` | No | Authentication key for private repos | `-ApiKey "AKCp5..."` |
 | `-DeepScan` | No | Download and scan package contents | `-DeepScan` |
-| `-All` | No | Scan extended package list including popular packages (⚠️ Resource intensive) | `-All` |
+| `-All` | No | Scan extended package list including popular packages (⚠️ Resource intensive if used with API on Jfrog, scan all) | `-All` |
 | `-OutputPath` | No | Custom output directory | `-OutputPath "C:\Reports"` |
 | `-Verbose` | No | Detailed logging | `-Verbose` |
 
@@ -189,7 +183,7 @@ Scan both local and remote simultaneously:
 - `-All` parameter scans extended package lists: 
   - **JFrog Artifactory**: Attempts to scan every package in repository
   - **NPM Registry**: Scans 25 malicious + 20 popular packages (45 total)
-- `-All` scanning is resource-intensive and may take several minutes
+- `-All` scanning is resource-intensive and may take several minutes for Jfrog
 - `-DeepScan` downloads actual package files to analyze JavaScript content
 - Combine `-All` and `-DeepScan` only for small repositories or targeted investigations  
 - Use `-Verbose` for troubleshooting connection or parsing issues
@@ -203,16 +197,6 @@ The scanner generates three types of output:
    - 🟡 **SUSPICIOUS** (Yellow): Obfuscation patterns detected
    - 🔵 **CHECK** (Cyan): Manual review needed
    - 🟢 **CLEAN** (Green): No issues found
-
-2. **JSON Report** - Detailed findings:
-   ```json
-   npm_scan_report_20250910_143022.json
-   ```
-
-3. **CSV Export** - Critical findings for analysis:
-   ```csv
-   npm_scan_critical_20250910_143022.csv
-   ```
 
 ## Detection Capabilities
 
@@ -236,7 +220,7 @@ The scanner generates three types of output:
 
 4. **Known Malicious Hashes**
    - SHA1: e9f9235f0fd79f5a7d099276ec6a9f8c5f0ddce9 (error-ex)
-   - And 4 other confirmed malicious file hashes
+   - And 4 other confirmed malicious file hashes known on the public internet TLP-WHITE
 
 ### ⚠️ Limitations
 
@@ -310,7 +294,8 @@ $trigger = New-ScheduledTaskTrigger -Daily -At 2am
 Register-ScheduledTask -TaskName "NPM Security Scan" -Action $action -Trigger $trigger
 ```
 
-### Integration with CI/CD
+### Integration with CI/CD 
+(not sure you'll be needing this without constantly updating the malicious_packages.json)
 ```yaml
 # Azure DevOps Pipeline
 - task: PowerShell@2
@@ -413,7 +398,7 @@ This tool is provided as-is for security scanning purposes. Use responsibly and 
   <p><a href="https://crimson7.io" target="_blank">https://crimson7.io</a></p>
   
   **Last Updated**: September 10, 2025  
-  **Version**: 1.1.0 (Final)  
-  **Status**: Production Ready - API-Based Scanning Only  
+  **Version**: 1.1.0 (Final Draft)  
+  **Status**: Production Draft - API-Based Scanning Only  
   **Package Database**: 25 malicious packages tracked
 </div>
