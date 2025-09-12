@@ -6,7 +6,7 @@
 **Runbook Type**: Supply Chain Attack Investigation  
 **Target Platforms**: Microsoft Sentinel, Microsoft Defender for Endpoint  
 **Attack Vector**: NPM Package Compromise via Supply Chain   
-**Affected Packages**: debug, chalk, and 16 other popular npm packages  
+**Affected Packages**: 25 compromised packages including debug, chalk, duckdb, and others  
 **Attack Vector**: supply chain compromise via infected npm repositories with javascript malware 
 **Primary Impact**: Browser-based cryptocurrency theft through supply chain compromise
 
@@ -22,7 +22,10 @@ Inspired from the Aikido threat intel advisory https://www.aikido.dev/blog/npm-d
 5. [Stage 3: Deep Forensic Analysis](#stage-3-deep-forensic-analysis)
 6. [Stage 4: Verification and Validation](#stage-4-verification-and-validation)
 7. [Remediation and Recovery](#remediation-and-recovery)
-8. [Lessons Learned](#lessons-learned)
+8. [Stage 5: Enhanced Malware-Specific Detection](#stage-5-enhanced-malware-specific-detection)
+9. [Lessons Learned](#lessons-learned)
+10. [Forensic Collection Template](#forensic-collection-template)
+11. [Quick Reference Card](#quick-reference-card)
 
 ---
 
@@ -88,7 +91,9 @@ let all_packages = dynamic([
     "debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
     "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
     "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
-    "supports-hyperlinks", "chalk-template", "backslash"
+    "supports-hyperlinks", "chalk-template", "backslash",
+    "duckdb", "@duckdb/node-api", "@duckdb/node-bindings", "@duckdb/duckdb-wasm",
+    "@coveops/abi", "prebid", "proto-tinker-wc"
 ]);
 let malicious_hashes = dynamic([
     "c26e923750ff24150d13dea46e0c9d848b390f0f",
@@ -202,12 +207,14 @@ DeviceProcessEvents
 
 #### Query 2.1.2 - NPM Package Installation Activity
 ```kql
-// Detect npm install commands for ALL 18 compromised packages
+// Detect npm install commands for ALL 25 compromised packages
 let compromised_packages = dynamic([
     "debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
     "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
     "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
-    "supports-hyperlinks", "chalk-template", "backslash"
+    "supports-hyperlinks", "chalk-template", "backslash",
+    "duckdb", "@duckdb/node-api", "@duckdb/node-bindings", "@duckdb/duckdb-wasm",
+    "@coveops/abi", "prebid", "proto-tinker-wc"
 ]);
 DeviceProcessEvents
 | where Timestamp > ago(14d)
@@ -290,10 +297,115 @@ union
 3. Recommend wallet key rotation
 4. Monitor for unauthorized transactions
 
-### Hypothesis 2.3: Automation and Scheduler Abuse
+### Hypothesis 2.3: Enhanced Browser-Crypto Network Correlation
+**Objective**: Correlate browser activity with cryptocurrency network connections for all 25 packages
+
+#### Query 2.3.1 - Browser and Crypto Network Activity Correlation (VALIDATED)
+```kql
+// CRITICAL: This query successfully detects browser-crypto correlations
+// Correlate browser and crypto activity within 1-hour windows
+let all_25_packages = dynamic([
+    "debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
+    "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
+    "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
+    "supports-hyperlinks", "chalk-template", "backslash",
+    "duckdb", "@duckdb/node-api", "@duckdb/node-bindings", "@duckdb/duckdb-wasm",
+    "@coveops/abi", "prebid", "proto-tinker-wc"
+]);
+let browser_activity = DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where FileName in~ ("chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe")
+| project BrowserTime = Timestamp, DeviceName, BrowserProcess = FileName, AccountName;
+let crypto_network = DeviceNetworkEvents
+| where Timestamp > ago(30d)
+| where RemoteUrl has_any ("metamask", "etherscan", "binance", "coinbase", "crypto", "wallet", "infura.io", "alchemy.com")
+| project NetworkTime = Timestamp, DeviceName, RemoteUrl, RemotePort, RemoteIP;
+let npm_activity = DeviceProcessEvents
+| where Timestamp > ago(30d)
+| where FileName in~ ("node.exe", "npm.cmd", "npm", "yarn", "pnpm")
+| where ProcessCommandLine has_any (all_25_packages)
+| project NPMTime = Timestamp, DeviceName, NPMCommand = ProcessCommandLine;
+browser_activity
+| join kind=inner (crypto_network) on DeviceName
+| where abs(datetime_diff('minute', BrowserTime, NetworkTime)) <= 60
+| join kind=leftouter (npm_activity) on DeviceName
+| where NPMTime between (BrowserTime - 24h) .. BrowserTime
+| summarize 
+    BrowserSessions = dcount(BrowserTime),
+    CryptoConnections = dcount(NetworkTime),
+    NPMInstalls = dcount(NPMTime),
+    CryptoURLs = make_set(RemoteUrl, 20),
+    Packages = make_set(NPMCommand, 10)
+    by DeviceName, bin(BrowserTime, 1h)
+| where CryptoConnections > 5
+| extend RiskScore = BrowserSessions * CryptoConnections * iff(NPMInstalls > 0, 10, 1)
+| order by RiskScore desc
+```
+
+**Action Steps:**
+1. Devices with RiskScore > 100 and NPMInstalls > 0 = **CRITICAL RISK**
+2. Review CryptoURLs for unusual wallet services
+3. Check if NPM packages were installed before crypto activity
+4. Alert users to verify all wallet transactions
+
+### Hypothesis 2.4: Comprehensive NPM Download Detection
+**Objective**: Detect all NPM download activity for any of the 25 compromised packages
+
+#### Query 2.4.1 - All Package Downloads Detection (VALIDATED)
+```kql
+// Comprehensive detection for all 25 compromised packages
+let all_25_packages = dynamic([
+    "debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
+    "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
+    "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
+    "supports-hyperlinks", "chalk-template", "backslash",
+    "duckdb", "@duckdb/node-api", "@duckdb/node-bindings", "@duckdb/duckdb-wasm",
+    "@coveops/abi", "prebid", "proto-tinker-wc"
+]);
+let malicious_versions = dynamic([
+    "debug@4.4.2", "chalk@5.6.1", "ansi-styles@6.2.2", "duckdb@1.3.3",
+    "@duckdb/node-api@1.3.3", "@duckdb/node-bindings@1.3.3", "@duckdb/duckdb-wasm@1.29.2",
+    "prebid@10.9.1", "prebid@10.9.2", "@coveops/abi@2.0.1"
+]);
+DeviceNetworkEvents
+| where Timestamp > ago(30d)
+| where RemoteUrl has_any ("npmjs.org", "registry.npmjs.org", "npmjs.com", "unpkg.com", "cdn.jsdelivr.net")
+| where RemoteUrl has_any (all_25_packages)
+| extend 
+    PackageName = extract(@"/([@\w\-]+)(?:@[\d\.]+)?(?:/|$)", 1, RemoteUrl),
+    Version = extract(@"@([\d\.]+)", 1, RemoteUrl),
+    FullPackage = strcat(extract(@"/([@\w\-]+@[\d\.]+)", 1, RemoteUrl))
+| where PackageName in (all_25_packages)
+| extend IsMaliciousVersion = FullPackage in (malicious_versions)
+| project Timestamp, DeviceName, RemoteUrl, PackageName, Version, IsMaliciousVersion,
+    InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| summarize 
+    FirstDownload = min(Timestamp),
+    LastDownload = max(Timestamp),
+    DownloadCount = count(),
+    UniquePackages = dcount(PackageName),
+    MaliciousVersions = countif(IsMaliciousVersion == true),
+    PackageList = make_set(PackageName),
+    VersionList = make_set(strcat(PackageName, "@", Version))
+    by DeviceName
+| extend ThreatLevel = case(
+    MaliciousVersions > 0, "CRITICAL",
+    UniquePackages >= 5, "HIGH",
+    UniquePackages >= 2, "MEDIUM",
+    "LOW")
+| order by ThreatLevel asc, MaliciousVersions desc
+```
+
+**Action Steps:**
+1. **CRITICAL** = Confirmed malicious version downloaded
+2. Export VersionList for all affected devices
+3. Check if packages are in production builds
+4. Initiate incident response for CRITICAL devices
+
+### Hypothesis 2.5: Automation and Scheduler Abuse
 **Objective**: Detect persistence through automation tools
 
-#### Query 2.3.1 - Scheduler and Automation Detection
+#### Query 2.5.1 - Scheduler and Automation Detection
 ```kql
 // Detect abuse of automation tools for persistence
 DeviceProcessEvents
@@ -422,7 +534,7 @@ DeviceNetworkEvents
 
 #### Query 3.3.1 - Multi-Project Contamination Detection
 ```kql
-// Identify spread across multiple projects with ALL 18 packages
+// Identify spread across multiple projects with ALL 25 packages
 let package_modifications = DeviceFileEvents
     | where Timestamp > ago(14d)
     | where FileName =~ "package.json"
@@ -434,7 +546,9 @@ let node_modules_content = DeviceFileEvents
     | where FileName has_any ("debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
         "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
         "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
-        "supports-hyperlinks", "chalk-template", "backslash")
+        "supports-hyperlinks", "chalk-template", "backslash",
+        "duckdb", "@duckdb/node-api", "@duckdb/node-bindings", "@duckdb/duckdb-wasm",
+        "@coveops/abi", "prebid", "proto-tinker-wc")
     | project DeviceName, FileTime = Timestamp, ModulePath = FolderPath;
 package_modifications
 | join kind=inner (node_modules_content) on DeviceName
@@ -518,7 +632,7 @@ DeviceProcessEvents
 
 ### Query R.1 - Comprehensive Affected Systems Identification
 ```kql
-// Identify all affected systems for remediation - ALL 18 packages
+// Identify all affected systems for remediation - ALL 25 packages
 let affected_by_hash = DeviceFileEvents
     | where Timestamp > ago(30d)
     | where SHA1 in (dynamic([
@@ -534,7 +648,9 @@ let affected_by_package = DeviceProcessEvents
     | where ProcessCommandLine has_any ("debug@", "chalk@", "ansi-styles@", "strip-ansi@", 
         "supports-color@", "wrap-ansi@", "ansi-regex@", "color-convert@", "slice-ansi@",
         "is-arrayish@", "color-name@", "error-ex@", "color-string@", "simple-swizzle@",
-        "has-ansi@", "supports-hyperlinks@", "chalk-template@", "backslash@")
+        "has-ansi@", "supports-hyperlinks@", "chalk-template@", "backslash@",
+        "duckdb@", "@duckdb/node-api@", "@duckdb/node-bindings@", "@duckdb/duckdb-wasm@",
+        "@coveops/abi@", "prebid@", "proto-tinker-wc@")
     | distinct DeviceName, Category = "Package_Installation";
 let affected_by_npm = DeviceProcessEvents
     | where Timestamp > ago(30d)
@@ -543,7 +659,9 @@ let affected_by_npm = DeviceProcessEvents
     | where ProcessCommandLine has_any ("debug", "chalk", "ansi-styles", "strip-ansi", 
         "supports-color", "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi",
         "is-arrayish", "color-name", "error-ex", "color-string", "simple-swizzle",
-        "has-ansi", "supports-hyperlinks", "chalk-template", "backslash")
+        "has-ansi", "supports-hyperlinks", "chalk-template", "backslash",
+        "duckdb", "@duckdb/node-api", "@duckdb/node-bindings", "@duckdb/duckdb-wasm",
+        "@coveops/abi", "prebid", "proto-tinker-wc")
     | distinct DeviceName, Category = "NPM_Activity";
 union affected_by_hash, affected_by_package, affected_by_npm
 | summarize Categories = make_set(Category) by DeviceName
@@ -557,7 +675,7 @@ union affected_by_hash, affected_by_package, affected_by_npm
 
 ### Query R.2 - Cleanup Validation
 ```kql
-// Verify successful cleanup for ALL 18 packages
+// Verify successful cleanup for ALL 25 packages
 DeviceFileEvents
 | where Timestamp > ago(1d)
 | where ActionType == "FileDeleted"
@@ -565,7 +683,8 @@ DeviceFileEvents
 | where FileName has_any ("debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
     "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
     "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
-    "supports-hyperlinks", "chalk-template", "backslash")
+    "supports-hyperlinks", "chalk-template", "backslash",
+    "duckdb", "@duckdb", "@coveops", "prebid", "proto-tinker-wc")
 | project Timestamp, DeviceName, FileName, FolderPath, InitiatingProcessAccountName
 | summarize CleanedPackages = count() by DeviceName
 ```
