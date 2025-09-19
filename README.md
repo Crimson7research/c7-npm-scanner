@@ -2,9 +2,9 @@
 
 ## Overview
 
-This repository contains a tool for detecting and investigating the September 2025 NPM compromise that affected 25 popular packages through a sophisticated phishing attack. The malware targets cryptocurrency wallets by injecting malicious code that intercepts and redirects transactions.
+This repository contains a tool for detecting and investigating the September 2025 NPM compromises that affected 212 packages across three major incidents, including the critical S1ngularity/Shai Hulud self-propagating worm attack. The malware targets cryptocurrency wallets, exfiltrates secrets, and can automatically propagate through GitHub Actions.
 
-## 🚀 v1.1.0 Final Draft
+## 🚀 v1.2.0 Shai Hulud Update
 
 ### ✅ Features Included:
 - **API-Based Repository Scanning**: Full support for JFrog Artifactory and NPM Registry
@@ -13,21 +13,23 @@ This repository contains a tool for detecting and investigating the September 20
 - **Comprehensive Mode (-All)**: Scans extended package lists (45 packages for NPM Registry)
 - **Cross-Platform Support**: Works on Windows, macOS, and Linux with PowerShell
 - **Professional Reporting**: JSON and CSV export with HTML report generation
-- **25 Malicious Package Detection**: Updated database including recent DuckDB compromise
+- **212 Malicious Package Detection**: Complete database including Shai Hulud worm (187 packages)
 
 ### 🔧 Improvements from v1.0:
 - Removed unreliable HTML scraping functionality for cleaner operation
 - Enhanced deep scanning with actual package tarball downloads
 - Improved error handling and cross-platform compatibility
-- Updated malicious package database (18 → 25 packages)
+- Updated malicious package database (18 → 212 packages, including 187 from Shai Hulud worm)
 
 ## 🚨 Critical Information
 
-**Incident Date**: September 8-9, 2025  
-**Affected Packages**: 25 packages including debug, chalk, ansi-styles, duckdb  
-**Attack Vector**: Browser-based cryptocurrency wallet hijacking  
-**Phishing Domain**: npmjs.help (now taken down)  
-**Latest Update**: Additional DuckDB packages compromised September 9, 2025
+**Incident Timeline**: September 8-16, 2025
+**Total Affected Packages**: 212 packages across 3 incidents
+- **Sept 8**: Initial compromise (18 packages: debug, chalk, etc.)
+- **Sept 9**: DuckDB packages (4 packages)
+- **Sept 16**: S1ngularity/Shai Hulud Worm (187 packages with self-propagation)
+**Attack Vectors**: Browser wallet hijacking, GitHub Actions manipulation, secret exfiltration
+**Critical Update**: Shai Hulud worm can self-propagate through npm and GitHub
 
 ## Repository Contents
 
@@ -203,15 +205,18 @@ The scanner generates three types of output:
 ### ✅ What the Scanner Detects
 
 1. **Exact Version Matching**
-   - All 25 compromised packages with specific malicious versions
+   - All 212 compromised packages with specific malicious versions
    - Original 18 packages: chalk@5.6.1, debug@4.4.2, ansi-styles@6.2.2
    - DuckDB packages: duckdb@1.3.3, @duckdb/node-api@1.3.3
+   - Shai Hulud worm: 187 packages including @crowdstrike/*, @ctrl/*, @nativescript-community/*
    - Additional packages: @coveops/abi@2.0.1, prebid@10.9.1/10.9.2
 
 2. **Obfuscation Patterns**
    - `const _0x112` signature pattern
    - Heavy hex-variable obfuscation (`_0x[0-9a-f]{4,}`)
    - Malware function names (`checkethereumw`, `stealthProxyControl`)
+   - Worm propagation patterns (GitHub Actions manipulation)
+   - Token stealing patterns (npm, GitHub, environment variables)
 
 3. **Cryptocurrency Targeting**
    - Multiple wallet addresses in single file
@@ -308,7 +313,7 @@ Register-ScheduledTask -TaskName "NPM Security Scan" -Action $action -Trigger $t
 
 ## Threat Intelligence
 
-### Compromised Packages List (25 Total)
+### Compromised Packages List (212 Total)
 
 #### Original Compromise (Sept 8, 2025)
 | Package | Malicious Version | Downloads (millions) |
@@ -337,14 +342,31 @@ Register-ScheduledTask -TaskName "NPM Security Scan" -Action $action -Trigger $t
 | proto-tinker-wc | 0.1.87 | Low impact |
 | prebid | 10.9.1, 10.9.2 | Multiple versions |
 
+#### Shai Hulud Worm Packages (Sept 16, 2025)
+187 packages including:
+- **@crowdstrike/** packages (9 packages: commitlint, falcon-shoelace, foundry-js, etc.)
+- **@ctrl/** packages (16 packages: deluge, ngx-codemirror, react-adsense, etc.)
+- **@nativescript-community/** packages (20+ packages)
+- **@operato/** packages (13 packages)
+- And 140+ more packages with self-propagation capability
+
 Full details in `malicious_packages.json`
 
 ### Malware Behavior
+
+#### Original Malware (Sept 8-9)
 - Executes in browser context
 - Hooks wallet transaction APIs
 - Swaps recipient addresses before signing
 - Uses visually similar addresses (Levenshtein algorithm)
 - No C2 communication (uses hardcoded addresses)
+
+#### Shai Hulud Worm (Sept 16)
+- **Self-propagation**: Automatically spreads to new packages
+- **GitHub Actions manipulation**: Modifies workflows for persistence
+- **Secret exfiltration**: Steals npm tokens, GitHub tokens, environment variables
+- **C2 Communication**: Connects to 185.174.137.80
+- **Persistence**: Modifies browser extensions and CI/CD pipelines
 
 ## Troubleshooting
 
@@ -381,7 +403,8 @@ Check for updates to `malicious_packages.json` as new threats emerge.
 
 ## References
 
-- [Aikido Security Blog](https://www.aikido.dev/blog/npm-debug-and-chalk-packages-compromised)
+- [Aikido Security Blog - Initial Compromise](https://www.aikido.dev/blog/npm-debug-and-chalk-packages-compromised)
+- [Aikido Security Blog - Shai Hulud Worm](https://www.aikido.dev/blog/s1ngularity-nx-attackers-strike-again)
 - [Malware Analysis](https://jdstaerk.substack.com/p/we-just-found-malicious-code-in-the)
 - [HackerNews Discussion](https://news.ycombinator.com/item?id=45169794)
 - [AlienVault OTX Pulse](https://otx.alienvault.com/pulse/68c16a7d9c09dc1274872fab)
@@ -397,8 +420,8 @@ This tool is provided as-is for security scanning purposes. Use responsibly and 
   <p><strong>Advanced Supply Chain Security Analysis</strong></p>
   <p><a href="https://crimson7.io" target="_blank">https://crimson7.io</a></p>
   
-  **Last Updated**: September 10, 2025  
-  **Version**: 1.1.0 (Final Draft)  
+  **Last Updated**: September 19, 2025
+  **Version**: 1.2.0 (Shai Hulud Update)  
   **Status**: Production Draft - API-Based Scanning Only  
-  **Package Database**: 25 malicious packages tracked
+  **Package Database**: 212 malicious packages tracked (including 187 from Shai Hulud worm)
 </div>
