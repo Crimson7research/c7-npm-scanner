@@ -185,7 +185,7 @@ let file_detections = DeviceFileEvents
     | project Timestamp, DeviceName, FileName, FolderPath, SHA1, DetectionType;
 let npm_commands = DeviceProcessEvents
     | where Timestamp > ago(timeframe)
-    | where FileName in~ ("npm", "npm.exe", "npm.cmd", "yarn", "yarn.exe", "pnpm", "pnpm.exe")
+    | where FileName in~ ("npm", "npm.exe", "npm.cmd", "yarn", "yarn.exe", "pnpm", "pnpm.exe","node","node.exe")
     | extend LowerCommandLine = tolower(ProcessCommandLine)
     | where LowerCommandLine has_any (all_packages)
     | extend DetectionType = "NPMCommand"
