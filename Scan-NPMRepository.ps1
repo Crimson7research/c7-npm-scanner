@@ -100,9 +100,32 @@ if ($RepositoryUrl) {
     # Note: URL validation moved after function definitions
 }
 
-# Load malicious package definitions
+# Load malicious package definitions with error handling
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$maliciousPackagesJson = Get-Content -Path "$scriptDir\malicious_packages.json" -Raw | ConvertFrom-Json
+$maliciousPackagesJsonPath = Join-Path $scriptDir "malicious_packages.json"
+
+try {
+    if (-not (Test-Path $maliciousPackagesJsonPath)) {
+        Write-Error "Critical: malicious_packages.json not found at $maliciousPackagesJsonPath"
+        Write-Host "Please ensure malicious_packages.json is in the same directory as this script." -ForegroundColor Yellow
+        exit 1
+    }
+
+    $maliciousPackagesJson = Get-Content -Path $maliciousPackagesJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+
+    # Validate JSON structure
+    if (-not $maliciousPackagesJson.malicious_packages) {
+        throw "Invalid JSON structure: 'malicious_packages' array not found"
+    }
+
+    Write-Host "[INFO] Loaded $(($maliciousPackagesJson.malicious_packages | Measure-Object).Count) malicious package definitions" -ForegroundColor Gray
+    Write-Host "[INFO] Last updated: $($maliciousPackagesJson.metadata.last_updated)" -ForegroundColor Gray
+}
+catch {
+    Write-Error "Failed to load or parse malicious_packages.json: $_"
+    Write-Host "Please ensure the file exists and is valid JSON." -ForegroundColor Yellow
+    exit 1
+}
 
 # Color coding for output
 function Write-ColorOutput {
@@ -157,17 +180,38 @@ function Test-MaliciousPackage {
         [string]$PackageName,
         [string]$Version
     )
-    
+
     $maliciousPackage = $maliciousPackagesJson.malicious_packages | Where-Object { $_.name -eq $PackageName }
-    
-    if ($maliciousPackage -and $maliciousPackage.malicious_version -eq $Version) {
-        return @{
-            Status = "MALICIOUS"
-            Details = "Exact match for compromised version $($maliciousPackage.malicious_version)"
-            Severity = $maliciousPackage.severity
+
+    if ($maliciousPackage) {
+        # Check if version matches - handle both old (malicious_version) and new (malicious_versions) formats
+        $isMatch = $false
+        $matchedVersion = ""
+
+        # Check new format (malicious_versions array)
+        if ($maliciousPackage.malicious_versions) {
+            if ($Version -in $maliciousPackage.malicious_versions) {
+                $isMatch = $true
+                $matchedVersion = $Version
+            }
+        }
+        # Check old format (malicious_version string)
+        elseif ($maliciousPackage.malicious_version -and $maliciousPackage.malicious_version -eq $Version) {
+            $isMatch = $true
+            $matchedVersion = $maliciousPackage.malicious_version
+        }
+
+        if ($isMatch) {
+            $incident = if ($maliciousPackage.incident) { $maliciousPackage.incident } else { "unknown" }
+            return @{
+                Status = "MALICIOUS"
+                Details = "Exact match for compromised version $matchedVersion (Incident: $incident)"
+                Severity = $maliciousPackage.severity
+                Incident = $incident
+            }
         }
     }
-    
+
     return $null
 }
 
@@ -176,14 +220,14 @@ function Test-ObfuscationPatterns {
     param(
         [string]$Content
     )
-    
+
     $suspiciousPatterns = @()
-    
+
     # Check for specific obfuscation pattern
     if ($Content -match "const\s+_0x112") {
         $suspiciousPatterns += "Found obfuscation pattern: const _0x112"
     }
-    
+
     # Check for general obfuscation
     if ($Content -match "_0x[0-9a-f]{4,}") {
         $matches = [regex]::Matches($Content, "_0x[0-9a-f]{4,}")
@@ -191,30 +235,179 @@ function Test-ObfuscationPatterns {
             $suspiciousPatterns += "Heavy obfuscation detected: $($matches.Count) hex-encoded variables"
         }
     }
-    
+
     # Check for wallet-related functions
     if ($Content -match "checkethereumw|stealthProxyControl") {
         $suspiciousPatterns += "Found malware function signatures"
     }
-    
+
     # Check for Levenshtein algorithm
     if ($Content -match "levenshtein|distance.*similarity") {
         $suspiciousPatterns += "Found Levenshtein distance algorithm (address swapping)"
     }
-    
+
     # Check for multiple wallet addresses
     $btcAddresses = [regex]::Matches($Content, "\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b")
     $ethAddresses = [regex]::Matches($Content, "\b0x[a-fA-F0-9]{40}\b")
-    
+
     if ($btcAddresses.Count -gt 5) {
         $suspiciousPatterns += "Multiple Bitcoin addresses found: $($btcAddresses.Count)"
     }
-    
+
     if ($ethAddresses.Count -gt 5) {
         $suspiciousPatterns += "Multiple Ethereum addresses found: $($ethAddresses.Count)"
     }
-    
+
     return $suspiciousPatterns
+}
+
+# Function to detect Shai Hulud worm patterns
+function Test-ShaiHuludPatterns {
+    param(
+        [string]$Content
+    )
+
+    $wormPatterns = @()
+
+    # Check for GitHub Actions manipulation
+    if ($Content -match "github\.actions|workflow_dispatch|\.github/workflows") {
+        $wormPatterns += "[SHAI-HULUD] GitHub Actions manipulation detected"
+    }
+
+    # Check for secret stealing patterns
+    if ($Content -match "secrets\.GITHUB_TOKEN|npm_token|NPM_TOKEN|process\.env\.(NPM|GITHUB)") {
+        $wormPatterns += "[SHAI-HULUD] Token/secret stealing code detected"
+    }
+
+    # Check for repository manipulation
+    if ($Content -match "repos/.*/actions|repos/.*/secrets|repos/.*/visibility|repository\.public") {
+        $wormPatterns += "[SHAI-HULUD] Repository manipulation API calls detected"
+    }
+
+    # Check for npm publish automation
+    if ($Content -match "npm\s+publish|npm\s+version|npm\s+login") {
+        $wormPatterns += "[SHAI-HULUD] Automated npm publishing code detected"
+    }
+
+    # Check for self-propagation patterns
+    if ($Content -match "self-propagat|worm|shai-?hulud|exfiltrat") {
+        $wormPatterns += "[SHAI-HULUD] Self-propagation indicators found"
+    }
+
+    # Check for octokit (GitHub API library)
+    if ($Content -match "octokit|@octokit/rest|github\.com/api") {
+        $wormPatterns += "[SHAI-HULUD] GitHub API manipulation library detected"
+    }
+
+    # Check patterns from malicious_packages.json if available
+    if ($maliciousPackagesJson.malware_signatures.shai_hulud_worm_patterns) {
+        foreach ($pattern in $maliciousPackagesJson.malware_signatures.shai_hulud_worm_patterns) {
+            if ($Content -match $pattern) {
+                $wormPatterns += "[SHAI-HULUD] Signature match: $pattern"
+            }
+        }
+    }
+
+    return $wormPatterns
+}
+
+# Unified function for deep scanning package contents
+function Invoke-DeepScan {
+    param(
+        [string]$PackageName,
+        [string]$Version,
+        [string]$TempDir,
+        [string]$ScanContext = "package"  # "package", "repository", "local"
+    )
+
+    $scanResults = @{
+        ObfuscationPatterns = @()
+        WormPatterns = @()
+        Status = "CLEAN"
+    }
+
+    try {
+        # Find the package directory (usually 'package' after extraction)
+        $packageDir = if ($ScanContext -eq "local") { $TempDir } else { Join-Path $TempDir "package" }
+
+        if (-not (Test-Path $packageDir)) {
+            Write-ColorOutput "      [WARNING] Package directory not found for deep scan" -Level "Check"
+            return $scanResults
+        }
+
+        # Get all JavaScript files to scan
+        $jsFiles = @()
+
+        # Priority files to check first
+        $priorityFiles = @("index.js", "main.js", "lib/index.js", "src/index.js", "dist/index.js")
+        foreach ($file in $priorityFiles) {
+            $fullPath = Join-Path $packageDir $file
+            if (Test-Path $fullPath) {
+                $jsFiles += Get-Item $fullPath
+            }
+        }
+
+        # Add other JS files (limit to prevent excessive scanning)
+        $additionalFiles = Get-ChildItem -Path $packageDir -Filter "*.js" -Recurse -ErrorAction SilentlyContinue |
+                          Where-Object { $_.FullName -notmatch "node_modules|test|spec|\.min\.js" } |
+                          Select-Object -First 20
+
+        $jsFiles += $additionalFiles
+
+        # Scan each file
+        foreach ($jsFile in $jsFiles) {
+            if (-not $jsFile) { continue }
+
+            $content = Get-Content -Path $jsFile.FullName -Raw -ErrorAction SilentlyContinue
+            if ($content) {
+                # Check for obfuscation patterns
+                $obfuscation = Test-ObfuscationPatterns -Content $content
+                if ($obfuscation.Count -gt 0) {
+                    $scanResults.ObfuscationPatterns += @{
+                        File = $jsFile.Name
+                        Patterns = $obfuscation
+                    }
+                    $scanResults.Status = "SUSPICIOUS"
+                }
+
+                # Check for Shai Hulud worm patterns
+                $wormSigs = Test-ShaiHuludPatterns -Content $content
+                if ($wormSigs.Count -gt 0) {
+                    $scanResults.WormPatterns += @{
+                        File = $jsFile.Name
+                        Patterns = $wormSigs
+                    }
+                    $scanResults.Status = "MALICIOUS"  # Worm patterns are critical
+                }
+            }
+        }
+
+        # Report findings
+        if ($scanResults.Status -eq "MALICIOUS") {
+            Write-ColorOutput "      [CRITICAL] Shai Hulud worm patterns detected!" -Level "Critical"
+            foreach ($finding in $scanResults.WormPatterns) {
+                Write-ColorOutput "        File: $($finding.File)" -Level "Critical"
+                foreach ($pattern in $finding.Patterns) {
+                    Write-ColorOutput "          $pattern" -Level "Critical"
+                }
+            }
+        }
+        elseif ($scanResults.Status -eq "SUSPICIOUS") {
+            Write-ColorOutput "      [SUSPICIOUS] Obfuscation patterns found" -Level "Suspicious"
+            foreach ($finding in $scanResults.ObfuscationPatterns) {
+                Write-ColorOutput "        File: $($finding.File): $($finding.Patterns[0])" -Level "Suspicious"
+            }
+        }
+        else {
+            Write-ColorOutput "      [CLEAN] No malicious patterns found in JavaScript files" -Level "Clean"
+        }
+    }
+    catch {
+        Write-ColorOutput "      [ERROR] Deep scan failed: $_" -Level "Critical"
+        $scanResults.Status = "ERROR"
+    }
+
+    return $scanResults
 }
 
 # Function to scan package.json file
@@ -268,18 +461,21 @@ function Test-PackageJson {
         # Deep scan if enabled
         if ($DeepScan -and $result.Status -ne "MALICIOUS") {
             $packageDir = Split-Path -Parent $PackageJsonPath
-            $jsFiles = Get-ChildItem -Path $packageDir -Filter "*.js" -Recurse -ErrorAction SilentlyContinue | 
-                       Where-Object { $_.FullName -notmatch "node_modules|test|spec" }
-            
-            foreach ($jsFile in $jsFiles) {
-                $content = Get-Content -Path $jsFile.FullName -Raw -ErrorAction SilentlyContinue
-                if ($content) {
-                    $patterns = Test-ObfuscationPatterns -Content $content
-                    if ($patterns.Count -gt 0) {
-                        $result.Status = "SUSPICIOUS"
-                        $result.Details += "File: $($jsFile.Name) - $($patterns -join '; ')"
-                        Write-ColorOutput "  [SUSPICIOUS] $($jsFile.Name): $($patterns[0])" -Level "Suspicious"
-                    }
+
+            # Use the unified deep scan function
+            $deepScanResults = Invoke-DeepScan -PackageName $packageName -Version $packageVersion -TempDir $packageDir -ScanContext "local"
+
+            # Update result based on deep scan findings
+            if ($deepScanResults.Status -eq "MALICIOUS") {
+                $result.Status = "MALICIOUS"
+                foreach ($finding in $deepScanResults.WormPatterns) {
+                    $result.Details += "Worm pattern in $($finding.File): $($finding.Patterns -join '; ')"
+                }
+            }
+            elseif ($deepScanResults.Status -eq "SUSPICIOUS" -and $result.Status -ne "MALICIOUS") {
+                $result.Status = "SUSPICIOUS"
+                foreach ($finding in $deepScanResults.ObfuscationPatterns) {
+                    $result.Details += "Obfuscation in $($finding.File): $($finding.Patterns -join '; ')"
                 }
             }
         }
@@ -325,8 +521,19 @@ function Get-PackageTarball {
         $tempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
         $tarballPath = Join-Path $tempDir "$PackageName-$Version.tgz"
         
-        # Download tarball
-        Invoke-WebRequest -Uri $tarballUrl -OutFile $tarballPath -Headers $Headers -ErrorAction Stop
+        # Download tarball with timeout
+        $webClient = New-Object System.Net.WebClient
+        foreach ($header in $Headers.GetEnumerator()) {
+            $webClient.Headers.Add($header.Key, $header.Value)
+        }
+
+        try {
+            # Set timeout to 30 seconds
+            $webClient.DownloadFile($tarballUrl, $tarballPath)
+        }
+        finally {
+            $webClient.Dispose()
+        }
         
         # Extract using tar (available on Windows 10+, macOS, Linux)
         if (Get-Command tar -ErrorAction SilentlyContinue) {
@@ -464,42 +671,29 @@ function Scan-RemoteRepository {
                                 if ($DeepScan -and -not $malCheck) {
                                     try {
                                         $tempDir = Get-PackageTarball -PackageName $packageName -Version $versionNum -RepoUrl $RepoUrl -Headers $headers
-                                        
+
                                         if ($tempDir) {
-                                            # Find JavaScript files (usually in package/ subdirectory after extraction)
-                                            $packageDir = Join-Path $tempDir "package"
-                                            
-                                            if (Test-Path $packageDir) {
-                                                # Check main entry point files
-                                                $mainFiles = @("index.js", "main.js", "lib/index.js")
-                                                $foundObfuscation = $false
-                                                
-                                                foreach ($mainFile in $mainFiles) {
-                                                    $jsPath = Join-Path $packageDir $mainFile
-                                                    if (Test-Path $jsPath) {
-                                                        $content = Get-Content -Path $jsPath -Raw -ErrorAction SilentlyContinue
-                                                        
-                                                        # Simple check for the specific obfuscation pattern
-                                                        if ($content -and $content -match "const\s+_0x112") {
-                                                            Write-ColorOutput "      [SUSPICIOUS] Obfuscation pattern found in $mainFile" -Level "Suspicious"
-                                                            $results.SuspiciousPackagesFound += @{
-                                                                Name = $packageName
-                                                                Version = $versionNum
-                                                                Details = @("Obfuscation pattern 'const _0x112' found in $mainFile")
-                                                                Path = $RepoUrl
-                                                                Status = "SUSPICIOUS"
-                                                            }
-                                                            $foundObfuscation = $true
-                                                            break
-                                                        }
-                                                    }
-                                                }
-                                                
-                                                if (-not $foundObfuscation) {
-                                                    Write-ColorOutput "      [CLEAN] No obfuscation patterns found in main files" -Level "Clean"
+                                            # Use unified deep scan function
+                                            $deepScanResults = Invoke-DeepScan -PackageName $packageName -Version $versionNum -TempDir $tempDir -ScanContext "repository"
+
+                                            # Process results
+                                            if ($deepScanResults.Status -eq "MALICIOUS") {
+                                                $results.MaliciousPackagesFound += @{
+                                                    Package = "$packageName@$versionNum"
+                                                    Details = "Shai Hulud worm patterns detected"
+                                                    WormPatterns = $deepScanResults.WormPatterns
                                                 }
                                             }
-                                            
+                                            elseif ($deepScanResults.Status -eq "SUSPICIOUS") {
+                                                $results.SuspiciousPackagesFound += @{
+                                                    Name = $packageName
+                                                    Version = $versionNum
+                                                    Details = $deepScanResults.ObfuscationPatterns | ForEach-Object { "$($_.File): $($_.Patterns -join '; ')" }
+                                                    Path = $RepoUrl
+                                                    Status = "SUSPICIOUS"
+                                                }
+                                            }
+
                                             # Clean up temp directory
                                             Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
                                         }
@@ -590,54 +784,68 @@ function Scan-RemoteRepository {
                     $latestVersion = $packageJson.'dist-tags'.latest
                     $allVersions = $packageJson.versions.PSObject.Properties.Name
                     
-                    # Check if malicious version exists (only for packages that have malicious versions)
-                    if ($package.malicious_version -and $package.malicious_version -in $allVersions) {
-                        Write-ColorOutput "    [CRITICAL] Malicious version $($package.malicious_version) found in repository!" -Level "Critical"
-                        
-                        $results.MaliciousPackagesFound += @{
-                            Package = "$($package.name)@$($package.malicious_version)"
-                            Details = "Malicious version available in repository (latest: $latestVersion)"
-                        }
-                        
-                        # Deep scan if enabled
-                        if ($DeepScan) {
-                            try {
-                                $tempDir = Get-PackageTarball -PackageName $package.name -Version $package.malicious_version -RepoUrl $RepoUrl -Headers $headers
-                                
-                                if ($tempDir) {
-                                    Write-ColorOutput "      [INFO] Deep scanning $($package.name)@$($package.malicious_version)..." -Level "Info"
-                                    
-                                    # Find the package directory (usually 'package' after extraction)
-                                    $packageDir = Join-Path $tempDir "package"
-                                    
-                                    if (Test-Path $packageDir) {
-                                        # Look for main entry point files
-                                        $mainFiles = @("index.js", "main.js", "lib/index.js")
-                                        
-                                        foreach ($mainFile in $mainFiles) {
-                                            $jsPath = Join-Path $packageDir $mainFile
-                                            if (Test-Path $jsPath) {
-                                                $content = Get-Content -Path $jsPath -Raw -ErrorAction SilentlyContinue
-                                                
-                                                if ($content -and $content -match "const\s+_0x112") {
-                                                    Write-ColorOutput "      [CONFIRMED] Obfuscation pattern 'const _0x112' found in $mainFile" -Level "Critical"
-                                                    break
-                                                }
-                                            }
-                                        }
-                                    }
-                                    
-                                    # Clean up
-                                    Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-                                }
+                    # Check if malicious version exists (handle both old and new format)
+                    $maliciousVersionsToCheck = @()
+                    if ($package.malicious_versions) {
+                        $maliciousVersionsToCheck = $package.malicious_versions
+                    }
+                    elseif ($package.malicious_version) {
+                        $maliciousVersionsToCheck = @($package.malicious_version)
+                    }
+
+                    foreach ($malVersion in $maliciousVersionsToCheck) {
+                        if ($malVersion -and $malVersion -in $allVersions) {
+                            Write-ColorOutput "    [CRITICAL] Malicious version $malVersion found in repository!" -Level "Critical"
+
+                            $incident = if ($package.incident) { $package.incident } else { "unknown" }
+                            $results.MaliciousPackagesFound += @{
+                                Package = "$($package.name)@$malVersion"
+                                Details = "Malicious version available in repository (latest: $latestVersion, Incident: $incident)"
+                                Incident = $incident
                             }
-                            catch {
-                                Write-ColorOutput "      [WARNING] Could not deep scan: $_" -Level "Check"
+                        
+                            # Deep scan if enabled
+                            if ($DeepScan) {
+                                try {
+                                    $tempDir = Get-PackageTarball -PackageName $package.name -Version $malVersion -RepoUrl $RepoUrl -Headers $headers
+
+                                    if ($tempDir) {
+                                        Write-ColorOutput "      [INFO] Deep scanning $($package.name)@$malVersion..." -Level "Info"
+
+                                        # Use unified deep scan function
+                                        $deepScanResults = Invoke-DeepScan -PackageName $package.name -Version $malVersion -TempDir $tempDir -ScanContext "repository"
+
+                                        # Process deep scan results
+                                        if ($deepScanResults.Status -eq "MALICIOUS") {
+                                            Write-ColorOutput "      [CONFIRMED] Shai Hulud worm patterns found!" -Level "Critical"
+                                        }
+                                        elseif ($deepScanResults.Status -eq "SUSPICIOUS") {
+                                            Write-ColorOutput "      [CONFIRMED] Obfuscation patterns found" -Level "Suspicious"
+                                        }
+
+                                        # Clean up
+                                        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+                                    }
+                                }
+                                catch {
+                                    Write-ColorOutput "      [WARNING] Could not deep scan: $_" -Level "Check"
+                                }
                             }
                         }
                     }
-                    elseif ($package.malicious_version) {
-                        Write-ColorOutput "    [CLEAN] Malicious version $($package.malicious_version) not found (latest: $latestVersion)" -Level "Clean"
+
+                    # Check if no malicious versions were found in repository
+                    if ($maliciousVersionsToCheck.Count -gt 0) {
+                        $foundAny = $false
+                        foreach ($malVersion in $maliciousVersionsToCheck) {
+                            if ($malVersion -in $allVersions) {
+                                $foundAny = $true
+                                break
+                            }
+                        }
+                        if (-not $foundAny) {
+                            Write-ColorOutput "    [CLEAN] No malicious versions found (latest: $latestVersion)" -Level "Clean"
+                        }
                     }
                     else {
                         # This is a popular package added for -All scanning (no known malicious version)
@@ -712,11 +920,24 @@ function Scan-RemoteRepository {
                 }
                 else {
                     # Handle direct package.json response (JFrog format)
-                    if ($packageJson.version -eq $package.malicious_version) {
-                        Write-ColorOutput "    [CRITICAL] Found malicious package: $($package.name)@$($package.malicious_version)" -Level "Critical"
+                    # Check if current version is malicious (handle both old and new format)
+                    $isCurrentVersionMalicious = $false
+                    $maliciousVersionsToCheck = @()
+
+                    if ($package.malicious_versions) {
+                        $maliciousVersionsToCheck = $package.malicious_versions
+                    }
+                    elseif ($package.malicious_version) {
+                        $maliciousVersionsToCheck = @($package.malicious_version)
+                    }
+
+                    if ($packageJson.version -in $maliciousVersionsToCheck) {
+                        Write-ColorOutput "    [CRITICAL] Found malicious package: $($package.name)@$($packageJson.version)" -Level "Critical"
+                        $incident = if ($package.incident) { $package.incident } else { "unknown" }
                         $results.MaliciousPackagesFound += @{
-                            Package = "$($package.name)@$($package.malicious_version)"
-                            Details = "Exact malicious version match"
+                            Package = "$($package.name)@$($packageJson.version)"
+                            Details = "Exact malicious version match (Incident: $incident)"
+                            Incident = $incident
                         }
                     }
                     else {
@@ -747,8 +968,17 @@ function Scan-LocalDirectory {
                     Where-Object { $_.FullName -notmatch "node_modules" }
     
     Write-ColorOutput "Found $($packageFiles.Count) package.json files to scan" -Level "Info"
-    
+
+    $currentFile = 0
     foreach ($packageFile in $packageFiles) {
+        $currentFile++
+
+        # Show progress
+        if ($packageFiles.Count -gt 5) {
+            $percentComplete = [math]::Round(($currentFile / $packageFiles.Count) * 100, 1)
+            Write-Progress -Activity "Scanning local packages" -Status "Scanning file $currentFile of $($packageFiles.Count) ($percentComplete%)" -PercentComplete $percentComplete -Id 2
+        }
+
         $result = Test-PackageJson -PackageJsonPath $packageFile.FullName
         
         switch ($result.Status) {
@@ -768,8 +998,12 @@ function Scan-LocalDirectory {
                 $results.CleanPackages += $result
             }
         }
-        
         $results.TotalPackagesScanned++
+    }
+
+    # Clear progress bar
+    if ($packageFiles.Count -gt 5) {
+        Write-Progress -Activity "Scanning local packages" -Completed -Id 2
     }
 }
 
@@ -797,6 +1031,25 @@ Write-ColorOutput "Malicious packages found: $($results.MaliciousPackagesFound.C
 Write-ColorOutput "Suspicious packages found: $($results.SuspiciousPackagesFound.Count)" -Level $(if ($results.SuspiciousPackagesFound.Count -gt 0) { "Suspicious" } else { "Clean" })
 Write-ColorOutput "Packages requiring manual check: $($results.RequireManualCheck.Count)" -Level $(if ($results.RequireManualCheck.Count -gt 0) { "Check" } else { "Clean" })
 Write-ColorOutput "Clean packages: $($results.CleanPackages.Count)" -Level "Clean"
+
+# Show incident breakdown if malicious packages found
+if ($results.MaliciousPackagesFound.Count -gt 0) {
+    Write-ColorOutput "`n--- INCIDENT BREAKDOWN ---" -Level "Info"
+
+    $incidentGroups = $results.MaliciousPackagesFound | Group-Object -Property {
+        if ($_.Incident) { $_.Incident } else { "unknown" }
+    }
+
+    foreach ($group in $incidentGroups) {
+        $incidentName = switch ($group.Name) {
+            "s1ngularity_shai_hulud_2025_09_16" { "Shai Hulud Worm (Sept 16, 2025)" }
+            "duckdb_compromise_2025_09_09" { "DuckDB Compromise (Sept 9, 2025)" }
+            "npm_compromise_2025_09_08" { "NPM Supply Chain (Sept 8, 2025)" }
+            default { $group.Name }
+        }
+        Write-ColorOutput "  $($incidentName): $($group.Count) packages" -Level "Critical"
+    }
+}
 
 # Export results
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"

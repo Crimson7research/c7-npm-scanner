@@ -3,14 +3,22 @@
 # NPM Supply Chain Compromise Threat Hunting Runbook
 ## Microsoft Sentinel & Defender Environment - Final Version
 
-**Runbook Type**: Supply Chain Attack Investigation  
-**Target Platforms**: Microsoft Sentinel, Microsoft Defender for Endpoint  
-**Attack Vector**: NPM Package Compromise via Supply Chain   
-**Affected Packages**: 25 compromised packages including debug, chalk, duckdb, and others  
-**Attack Vector**: supply chain compromise via infected npm repositories with javascript malware 
-**Primary Impact**: Browser-based cryptocurrency theft through supply chain compromise
+**Runbook Type**: Supply Chain Attack Investigation
+**Target Platforms**: Microsoft Sentinel, Microsoft Defender for Endpoint
+**Attack Vector**: NPM Package Compromise via Supply Chain & Self-Propagating Worm
+**Total Affected Packages**: 212 compromised packages across 3 major incidents
+**Critical Incident**: S1ngularity/Shai Hulud Worm (Sept 16, 2025) - 187 packages with self-propagation
+**Attack Evolution**: From simple malware injection to self-propagating worm with GitHub Actions abuse
+**Primary Impact**: Browser-based cryptocurrency theft, secret exfiltration, and automated propagation
 
-Inspired from the Aikido threat intel advisory https://www.aikido.dev/blog/npm-debug-and-chalk-packages-compromised
+### Incident Timeline:
+- **Sept 8, 2025**: Initial NPM compromise (debug, chalk, etc.) - 18 packages
+- **Sept 9, 2025**: DuckDB packages compromised - 4 packages
+- **Sept 16, 2025**: S1ngularity/Shai Hulud Worm - 187 packages (CRITICAL)
+
+Threat Intelligence Sources:
+- Aikido Security: https://www.aikido.dev/blog/npm-debug-and-chalk-packages-compromised
+- Aikido Security: https://www.aikido.dev/blog/s1ngularity-nx-attackers-strike-again
 
 ---
 
@@ -21,11 +29,12 @@ Inspired from the Aikido threat intel advisory https://www.aikido.dev/blog/npm-d
 4. [Stage 2: Focused Investigation](#stage-2-focused-investigation)
 5. [Stage 3: Deep Forensic Analysis](#stage-3-deep-forensic-analysis)
 6. [Stage 4: Verification and Validation](#stage-4-verification-and-validation)
-7. [Remediation and Recovery](#remediation-and-recovery)
-8. [Stage 5: Enhanced Malware-Specific Detection](#stage-5-enhanced-malware-specific-detection)
-9. [Lessons Learned](#lessons-learned)
-10. [Forensic Collection Template](#forensic-collection-template)
-11. [Quick Reference Card](#quick-reference-card)
+7. [Stage 5: Enhanced Malware-Specific Detection](#stage-5-enhanced-malware-specific-detection)
+8. [Stage 6: Shai Hulud Worm-Specific Detection](#stage-6-shai-hulud-worm-specific-detection)
+9. [Remediation and Recovery](#remediation-and-recovery)
+10. [Lessons Learned](#lessons-learned)
+11. [Forensic Collection Template](#forensic-collection-template)
+12. [Quick Reference Card](#quick-reference-card)
 
 ---
 
@@ -88,12 +97,24 @@ graph TD
 // Run this FIRST for initial triage
 let timeframe = 30d;
 let all_packages = dynamic([
+    // Initial compromise packages (Sept 8, 2025)
     "debug", "chalk", "ansi-styles", "strip-ansi", "supports-color",
     "wrap-ansi", "ansi-regex", "color-convert", "slice-ansi", "is-arrayish",
     "color-name", "error-ex", "color-string", "simple-swizzle", "has-ansi",
     "supports-hyperlinks", "chalk-template", "backslash",
+    // DuckDB packages (Sept 9, 2025)
     "duckdb", "@duckdb/node-api", "@duckdb/node-bindings", "@duckdb/duckdb-wasm",
-    "@coveops/abi", "prebid", "proto-tinker-wc"
+    // Additional packages
+    "@coveops/abi", "prebid", "proto-tinker-wc",
+    // Shai Hulud worm packages (Sept 16, 2025) - representative sample
+    "@ahmedhfarag/ngx-perfect-scrollbar", "@ahmedhfarag/ngx-virtual-scroller",
+    "@art-ws/common", "@art-ws/config-eslint", "@art-ws/config-ts",
+    "@bamboooo-cn/utils", "@bluespirex/ui-colors", "@bluespirex/ui-components",
+    "@cargofive/nx", "@cloud-lance/nx-monorepo", "@codemod-utils/ast-javascript",
+    "@cpecortez/testing", "@cubelight-digital/nx-boilerplate", "@dreamplug-node/nx-tools",
+    "@jbiskur/nestjs-test-utilities", "@jvfy/nx-serverless", "@kamrankhatti/crypees-util",
+    "@niceorg/nx-eslint-plugin", "@opensource-nepal/nepali", "@quikdev/nx",
+    "react-server-dom-turbopack", "react-dom-turbopack", "ts-emitter"
 ]);
 let malicious_hashes = dynamic([
     "c26e923750ff24150d13dea46e0c9d848b390f0f",
@@ -630,6 +651,34 @@ DeviceProcessEvents
 
 ## Remediation and Recovery
 
+### Shai Hulud Worm Cleanup Procedures
+
+#### Immediate Actions for Worm-Infected Systems:
+1. **Isolate Affected Systems**: Disconnect from network immediately
+2. **Revoke All Tokens**:
+   - NPM tokens: `npm token revoke <token>`
+   - GitHub tokens: Settings → Developer settings → Personal access tokens
+   - CI/CD tokens: Rotate all service account credentials
+3. **Audit Published Packages**:
+   ```bash
+   npm owner ls <package-name>
+   npm unpublish <package-name>@<version> --force
+   ```
+4. **Clean GitHub Actions**:
+   - Review all `.github/workflows/*.yml` files
+   - Remove any unauthorized workflow modifications
+   - Audit repository secrets for unauthorized additions
+5. **Repository Cleanup**:
+   ```bash
+   # Check for malicious commits
+   git log --since="2025-09-16" --pretty=format:"%h %an %s"
+   # Remove malicious branches
+   git branch -D suspicious-branch
+   # Force clean reinstall
+   rm -rf node_modules package-lock.json
+   npm install
+   ```
+
 ### Query R.1 - Comprehensive Affected Systems Identification
 ```kql
 // Identify all affected systems for remediation - ALL 25 packages
@@ -817,6 +866,167 @@ DeviceFileEvents
 
 ---
 
+## Stage 6: Shai Hulud Worm-Specific Detection
+
+### Hypothesis 6.1: GitHub Actions Manipulation Detection
+**Objective**: Identify systems where the Shai Hulud worm may have manipulated GitHub Actions workflows
+
+#### Query 6.1.1 - GitHub Actions File Modifications
+```kql
+// Detect modifications to GitHub Actions workflow files
+DeviceFileEvents
+| where Timestamp > ago(7d)
+| where FolderPath has ".github/workflows"
+| where FileName endswith ".yml" or FileName endswith ".yaml"
+| where ActionType in ("FileCreated", "FileModified")
+| project Timestamp, DeviceName, FileName, FolderPath, SHA1, InitiatingProcessFileName, InitiatingProcessAccountName
+| extend RiskLevel = case(
+    InitiatingProcessFileName in~ ("node.exe", "npm", "npx"), "CRITICAL",
+    FolderPath contains "node_modules", "HIGH",
+    "MEDIUM")
+| order by RiskLevel asc, Timestamp desc
+```
+
+**Action Steps:**
+1. **CRITICAL**: Node.js processes modifying workflows = active worm
+2. Review workflow changes for malicious steps
+3. Check for new secrets or token extraction
+4. Isolate affected repositories immediately
+
+### Hypothesis 6.2: Self-Propagation Pattern Detection
+**Objective**: Detect the worm's self-propagation behavior across repositories
+
+#### Query 6.2.1 - Rapid Package Publishing Detection
+```kql
+// Detect rapid npm publish commands indicating propagation
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where ProcessCommandLine has_all ("npm", "publish")
+| project Timestamp, DeviceName, ProcessCommandLine, InitiatingProcessCommandLine, AccountName
+| summarize PublishCount = count(),
+    Packages = make_set(ProcessCommandLine),
+    FirstPublish = min(Timestamp),
+    LastPublish = max(Timestamp)
+    by DeviceName, AccountName
+| extend TimeDiff = datetime_diff('minute', LastPublish, FirstPublish)
+| where PublishCount > 5 or TimeDiff < 60
+| extend RiskLevel = case(
+    PublishCount > 20, "CRITICAL",
+    PublishCount > 10, "HIGH",
+    "MEDIUM")
+| order by RiskLevel asc, PublishCount desc
+```
+
+**Action Steps:**
+1. Investigate devices with >10 publishes in short timeframe
+2. Review published package names for suspicious patterns
+3. Check npm registry for unauthorized packages
+4. Revoke npm tokens immediately
+
+### Hypothesis 6.3: Secret and Token Exfiltration
+**Objective**: Detect attempts to steal GitHub tokens, npm tokens, and other secrets
+
+#### Query 6.3.1 - Token and Secret Access Detection
+```kql
+// Detect access to token/secret storage locations
+union
+(DeviceFileEvents
+| where Timestamp > ago(7d)
+| where FolderPath has_any (".npmrc", ".env", ".git/config", "GitHub Desktop", "gh/config")
+| where ActionType == "FileAccessed"
+| extend SecretType = case(
+    FolderPath contains ".npmrc", "NPM_Token",
+    FolderPath contains ".env", "Environment_Secrets",
+    FolderPath contains "GitHub", "GitHub_Token",
+    "Other_Secret")),
+(DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where ProcessCommandLine has_any ("NPM_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "NODE_AUTH_TOKEN")
+| extend SecretType = "Environment_Variable_Access")
+| project Timestamp, DeviceName, SecretType, FileName, ProcessCommandLine, InitiatingProcessFileName
+| summarize SecretAccessCount = count(),
+    SecretTypes = make_set(SecretType),
+    Files = make_set(FileName)
+    by DeviceName, InitiatingProcessFileName
+| where SecretAccessCount > 3
+| order by SecretAccessCount desc
+```
+
+**Action Steps:**
+1. Rotate ALL tokens on affected devices
+2. Enable 2FA on npm and GitHub accounts
+3. Audit published packages for backdoors
+4. Review GitHub Actions secrets usage
+
+### Hypothesis 6.4: Worm Payload Download Detection
+**Objective**: Detect downloads of worm payloads from suspicious domains
+
+#### Query 6.4.1 - Suspicious Payload Downloads
+```kql
+// Detect downloads from known worm C2 domains
+DeviceNetworkEvents
+| where Timestamp > ago(7d)
+| where RemoteUrl has_any (
+    "185.174.137.80",  // Known C2 server
+    "/dist/bundle.js",  // Common payload path
+    "/inject.js",
+    "contentscript.js")
+| project Timestamp, DeviceName, RemoteUrl, RemoteIP, InitiatingProcessFileName, BytesReceived
+| extend RiskLevel = case(
+    RemoteIP == "185.174.137.80", "CRITICAL",
+    RemoteUrl endswith "inject.js", "HIGH",
+    "MEDIUM")
+| order by RiskLevel asc, Timestamp desc
+```
+
+**Action Steps:**
+1. Block IP 185.174.137.80 at firewall
+2. Isolate devices that connected to C2
+3. Perform full forensic analysis
+4. Check for lateral movement
+
+### Hypothesis 6.5: Compromised Package Installation from Shai Hulud Attack
+**Objective**: Detect installation of any of the 187 packages compromised in the Shai Hulud attack
+
+#### Query 6.5.1 - Shai Hulud Package Detection
+```kql
+// Detect installation of Shai Hulud compromised packages
+let shai_hulud_packages = dynamic([
+    "@ahmedhfarag/ngx-perfect-scrollbar", "@ahmedhfarag/ngx-virtual-scroller",
+    "@art-ws/common", "@art-ws/config-eslint", "@art-ws/config-ts",
+    "@bamboooo-cn/utils", "@bluespirex/ui-colors", "@bluespirex/ui-components",
+    "@cargofive/nx", "@cloud-lance/nx-monorepo", "@codemod-utils/ast-javascript",
+    "@cpecortez/testing", "@cubelight-digital/nx-boilerplate", "@dreamplug-node/nx-tools",
+    "@jbiskur/nestjs-test-utilities", "@jvfy/nx-serverless", "@kamrankhatti/crypees-util",
+    "@niceorg/nx-eslint-plugin", "@opensource-nepal/nepali", "@quikdev/nx",
+    "react-server-dom-turbopack", "react-dom-turbopack", "ts-emitter"
+    // Note: This is a sample of 187 total packages
+]);
+DeviceProcessEvents
+| where Timestamp > ago(7d)
+| where ProcessCommandLine has "npm" or ProcessCommandLine has "yarn"
+| where ProcessCommandLine has_any (shai_hulud_packages)
+| project Timestamp, DeviceName, ProcessCommandLine, AccountName, InitiatingProcessFileName
+| extend DetectedPackage = extract(@"([\w@/-]+)", 1, ProcessCommandLine)
+| where DetectedPackage in (shai_hulud_packages)
+| summarize InstallCount = count(),
+    Packages = make_set(DetectedPackage),
+    FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp)
+    by DeviceName
+| extend RiskLevel = "CRITICAL"  // All Shai Hulud packages are critical
+| order by InstallCount desc
+```
+
+**Action Steps:**
+1. **IMMEDIATE**: Remove ALL detected Shai Hulud packages
+2. Scan for worm persistence mechanisms
+3. Check GitHub repositories for infection
+4. Audit npm publish history
+5. Reset all development environment credentials
+
+---
+
 ## Lessons Learned
 
 ### Key Detection Patterns
@@ -872,9 +1082,15 @@ union
 ### Critical IOCs
 - **Malicious Hashes**: c26e923750ff24150d13dea46e0c9d848b390f0f, e9f9235f0fd79f5a7d099276ec6a9f8c5f0ddce9, ebcf69dc3d77aab6a23c733bf8d3de835a4a819a, 5518bc3a1df75f8e480efb32fa78de15e775155d, c577099020e7ae370c67ce9a31170eff4d7f2b038
 - **Suspicious Commands**: `node index.js` (bare), `sh -c node`
-- **ALL 18 Compromised Packages**: debug, chalk, ansi-styles, strip-ansi, supports-color, wrap-ansi, ansi-regex, color-convert, slice-ansi, is-arrayish, color-name, error-ex, color-string, simple-swizzle, has-ansi, supports-hyperlinks, chalk-template, backslash
-- **Browser Files**: page_embed_script.js, service_worker.js
+- **C2 Infrastructure**: IP 185.174.137.80, domains with `/dist/bundle.js`
+- **Worm Indicators**: Rapid npm publishes, GitHub Actions modifications, token exfiltration
+- **Total Compromised Packages**: 212 packages across 3 incidents
+  - Initial compromise (Sept 8): 18 packages including debug, chalk
+  - DuckDB incident (Sept 9): 4 packages
+  - Shai Hulud worm (Sept 16): 187 packages with self-propagation capability
+- **Browser Files**: page_embed_script.js, service_worker.js, inject.js, contentscript.js
 - **Automation Accounts**: rundeck, jenkins, automation service accounts
+- **Token Locations**: .npmrc, .env, .git/config, GitHub Desktop configs
 
 ### Severity Classification
 - **CRITICAL**: Confirmed hash match or bare command execution
